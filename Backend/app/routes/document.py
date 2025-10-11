@@ -1,13 +1,13 @@
 """
 Document Management API Routes
 Handles PDF upload, listing, and deletion with user authentication
+Documents are processed in-memory and only metadata is persisted to database
 """
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List
 import logging
-import shutil
+import io
 
 from fastapi import (
     APIRouter,
@@ -18,10 +18,13 @@ from fastapi import (
     Depends,
     BackgroundTasks,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.auth import get_current_user
 from app.config import settings
-from app.models.db_models import User
+
+from app.models.db_models import User, UserDocument
 from app.models.schemas import (
     DocumentUploadResponse,
     DocumentListResponse,
@@ -31,6 +34,7 @@ from app.models.schemas import (
 from app.services.pdf_processor import pdf_processor
 from app.services.vector_store import vector_store_service
 from app.utils.chunking import chunk_documents, get_chunk_statistics
+from app.db.session import get_async_session, AsyncSessionLocal
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -45,7 +49,7 @@ router = APIRouter()
 
 async def process_document_background(
     *,
-    file_path: Path,
+    file_content: bytes,
     document_id: str,
     user_id: int,
     filename: str,
@@ -53,61 +57,128 @@ async def process_document_background(
     """
     Background processing function for PDF documents.
 
-    Handles validation, text extraction, chunking, and embedding storage.
+    Processes PDF from memory, creates embeddings, and updates database status.
+    File is not persisted to disk.
+    """
+    # Create a new session for background task
+    async with AsyncSessionLocal() as session:
+        try:
+            logger.info(
+                f"🔄 Starting background processing for user {user_id}: {document_id}"
+            )
+
+            # Validate PDF structure from bytes
+            is_valid, error_msg = pdf_processor.validate_pdf_bytes(file_content)
+            if not is_valid:
+                logger.error(f"Invalid PDF for user {user_id}: {error_msg}")
+                await _update_document_status(session, user_id, document_id, "error")
+                return
+
+            # Extract text content from bytes
+            logger.debug(f"Extracting text from {filename}")
+            pages_content = pdf_processor.extract_text_from_bytes(file_content)
+
+            # Chunk document
+            logger.debug(
+                f"Chunking document {document_id} with strategy: {settings.CHUNKING_STRATEGY}"
+            )
+            chunks = chunk_documents(
+                pages_content=pages_content,
+                document_id=document_id,
+                strategy=settings.CHUNKING_STRATEGY,
+            )
+
+            chunk_stats = get_chunk_statistics(chunks)
+            logger.info(
+                f"Generated {chunk_stats['total_chunks']} chunks for {document_id}: {chunk_stats}"
+            )
+
+            # Store embeddings with user_id
+            logger.debug(
+                f"Adding {len(chunks)} chunks to vector store for user {user_id}"
+            )
+            result = vector_store_service.add_documents(
+                documents=chunks, document_id=document_id, user_id=user_id
+            )
+
+            if result["success"]:
+                # Update database record with success status
+                await _update_document_status(
+                    session,
+                    user_id,
+                    document_id,
+                    "ready",
+                    chunk_count=chunk_stats["total_chunks"],
+                )
+
+                logger.info(
+                    f"✅ Background processing complete for user {user_id}: "
+                    f"{document_id} ({chunk_stats['total_chunks']} chunks)"
+                )
+            else:
+                # Update status to error
+                await _update_document_status(session, user_id, document_id, "error")
+
+                logger.error(
+                    f"Failed to add document to vector store for user {user_id}: "
+                    f"{result.get('error')}"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"❌ Background processing failed for user {user_id}, document {document_id}: {e}",
+                exc_info=True,
+            )
+
+            # Update status to error
+            try:
+                await _update_document_status(session, user_id, document_id, "error")
+            except Exception as db_error:
+                logger.error(f"Failed to update error status: {db_error}")
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+async def _update_document_status(
+    session: AsyncSession,
+    user_id: int,
+    document_id: str,
+    status: str,
+    chunk_count: int | None = None,
+) -> None:
+    """
+    Helper function to update document status in database.
+
+    Args:
+        session: Database session
+        user_id: User ID
+        document_id: Document ID
+        status: New status ('processing', 'ready', 'error')
+        chunk_count: Optional chunk count to update
     """
     try:
-        logger.info(
-            f"🔄 Starting background processing for user {user_id}: {document_id}"
+        stmt = select(UserDocument).where(
+            UserDocument.user_id == user_id, UserDocument.document_id == document_id
         )
+        result = await session.execute(stmt)
+        user_doc = result.scalar_one_or_none()
 
-        # Validate PDF structure
-        is_valid, error_msg = pdf_processor.validate_pdf(file_path)
-        if not is_valid:
-            logger.error(f"Invalid PDF for user {user_id}: {error_msg}")
-            file_path.unlink()
-            return
-
-        # Extract text content
-        logger.debug(f"Extracting text from {filename}")
-        pages_content = pdf_processor.extract_text(file_path)
-
-        # Chunk document
-        logger.debug(
-            f"Chunking document {document_id} with strategy: {settings.CHUNKING_STRATEGY}"
-        )
-        chunks = chunk_documents(
-            pages_content=pages_content,
-            document_id=document_id,
-            strategy=settings.CHUNKING_STRATEGY,
-        )
-
-        chunk_stats = get_chunk_statistics(chunks)
-        logger.info(
-            f"Generated {chunk_stats['total_chunks']} chunks for {document_id}: {chunk_stats}"
-        )
-
-        # Store embeddings with user_id
-        logger.debug(f"Adding {len(chunks)} chunks to vector store for user {user_id}")
-        result = vector_store_service.add_documents(
-            documents=chunks, document_id=document_id, user_id=user_id
-        )
-
-        if result["success"]:
-            logger.info(
-                f"✅ Background processing complete for user {user_id}: "
-                f"{document_id} ({chunk_stats['total_chunks']} chunks)"
-            )
+        if user_doc:
+            user_doc.status = status
+            if chunk_count is not None:
+                user_doc.chunk_count = chunk_count
+            await session.commit()
+            logger.debug(f"Updated document {document_id} status to: {status}")
         else:
-            logger.error(
-                f"Failed to add document to vector store for user {user_id}: "
-                f"{result.get('error')}"
-            )
+            logger.warning(f"Document not found in DB: {document_id}")
 
     except Exception as e:
-        logger.error(
-            f"❌ Background processing failed for user {user_id}, document {document_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"Error updating document status: {e}")
+        await session.rollback()
+        raise
 
 
 # ============================================================================
@@ -125,17 +196,18 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     Upload and process a PDF document (requires authentication).
 
     - Validates file type and size limits
     - Checks for duplicate documents
+    - Stores metadata in database
     - Returns immediately with processing status
     - Actual processing happens in background
+    - File is NOT persisted to disk
     """
-    temp_file_path = None
-
     try:
         logger.info(
             f"User {current_user.id} ({current_user.username}) uploading document: "
@@ -152,11 +224,12 @@ async def upload_document(
                 detail="Only PDF files are supported",
             )
 
-        # Check file size
-        file.file.seek(0, 2)
-        file_size = file.file.tell()
-        file.file.seek(0)
+        # Read file content into memory
+        file_content = await file.read()
+        file_size = len(file_content)
+        await file.close()
 
+        # Check file size
         max_size = settings.MAX_FILE_SIZE_MB * 1024 * 1024
         if file_size > max_size:
             logger.warning(
@@ -170,80 +243,67 @@ async def upload_document(
 
         logger.debug(f"File size validated: {file_size / (1024*1024):.2f}MB")
 
-        # Create user-specific upload directory
-        user_upload_dir = settings.UPLOAD_FOLDER / f"user_{current_user.id}"
-        user_upload_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Using upload directory: {user_upload_dir}")
-
-        # Save uploaded file temporarily to generate ID
-        temp_file_path = user_upload_dir / f"temp_{file.filename}"
-
-        try:
-            with open(temp_file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-            logger.debug(f"Temporary file saved: {temp_file_path}")
-        finally:
-            await file.close()
-
         # Generate document ID from content
-        document_id = pdf_processor.generate_document_id(
-            temp_file_path, current_user.id
+        document_id = pdf_processor.generate_document_id_from_bytes(
+            file_content, current_user.id
         )
 
         logger.debug(f"Generated document ID: {document_id}")
 
-        # Check if document already exists for this user
-        existing_chunks = vector_store_service.get_document_chunks(
-            document_id, current_user.id
+        # Check if document already exists in database
+        stmt = select(UserDocument).where(
+            UserDocument.user_id == current_user.id,
+            UserDocument.document_id == document_id
         )
+        result = await session.execute(stmt)
+        existing_doc = result.scalar_one_or_none()
 
-        if existing_chunks:
+        if existing_doc:
             logger.info(
                 f"Duplicate upload detected for user {current_user.id}: "
-                f"{document_id} ({len(existing_chunks)} existing chunks)"
+                f"{document_id} (existing record found)"
             )
 
-            # Find existing file to get metadata
-            existing_file = None
-            for file_path in user_upload_dir.glob("*.pdf"):
-                if (
-                    pdf_processor.generate_document_id(file_path, current_user.id)
-                    == document_id
-                ):
+            # Check vector store for chunks
+            existing_chunks = vector_store_service.get_document_chunks(
+                document_id, current_user.id
+            )
 
-                    existing_file = file_path
-                    break
-
-            # Remove temp file
-            temp_file_path.unlink()
-            logger.debug("Removed temporary duplicate file")
-
-            if existing_file:
-                metadata = pdf_processor.extract_metadata(existing_file)
-
-                return DocumentUploadResponse(
-                    document_id=document_id,
-                    filename=existing_file.name,
-                    file_size=existing_file.stat().st_size,
-                    status=DocumentStatus.READY,
-                    pages=metadata["pages"],
-                    upload_time=datetime.fromtimestamp(existing_file.stat().st_mtime),
-                    message=f"Document already exists with {len(existing_chunks)} chunks. Reusing existing embeddings.",
-                )
-
-        # Document is new - rename temp file to final name
-        file_path = user_upload_dir / f"{document_id}_{file.filename}"
-        temp_file_path.rename(file_path)
-        logger.debug(f"Renamed to final file: {file_path.name}")
+            return DocumentUploadResponse(
+                document_id=document_id,
+                filename=existing_doc.filename,
+                file_size=existing_doc.file_size,
+                status=DocumentStatus(existing_doc.status),
+                pages=existing_doc.pages,
+                upload_time=existing_doc.upload_time,
+                message=f"Document already exists with {len(existing_chunks)} chunks. Reusing existing embeddings.",
+            )
 
         # Extract quick metadata for immediate response
-        metadata = pdf_processor.extract_metadata(file_path)
+        metadata = pdf_processor.extract_metadata_from_bytes(file_content)
         logger.debug(f"Extracted metadata: {metadata['pages']} pages")
 
-        # Queue background processing
+        # Create database record
+        user_document = UserDocument(
+            user_id=current_user.id,
+            document_id=document_id,
+            filename=file.filename,
+            file_size=file_size,
+            pages=metadata["pages"],
+            upload_time=datetime.now(timezone.utc),
+            status="processing",
+            chunk_count=0,
+        )
+
+        session.add(user_document)
+        await session.commit()
+        await session.refresh(user_document)
+        logger.debug(f"Created UserDocument record with id: {user_document.id}")
+
+        # Queue background processing with file content
         background_tasks.add_task(
             process_document_background,
-            file_path=file_path,
+            file_content=file_content,
             document_id=document_id,
             user_id=current_user.id,
             filename=file.filename,
@@ -271,9 +331,6 @@ async def upload_document(
             f"Error uploading document for user {current_user.id}: {str(e)}",
             exc_info=True,
         )
-        if temp_file_path and temp_file_path.exists():
-            temp_file_path.unlink()
-            logger.debug("Cleaned up temporary file after error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing document: {str(e)}",
@@ -286,6 +343,7 @@ async def batch_upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     Upload multiple PDF documents at once (requires authentication).
@@ -301,7 +359,10 @@ async def batch_upload_documents(
         try:
             logger.debug(f"Processing batch file {idx}/{len(files)}: {file.filename}")
             result = await upload_document(
-                background_tasks=background_tasks, file=file, current_user=current_user
+                background_tasks=background_tasks,
+                file=file,
+                current_user=current_user,
+                session=session,
             )
             results.append(result)
         except HTTPException as e:
@@ -331,66 +392,28 @@ async def batch_upload_documents(
 
 
 @router.get("/", response_model=DocumentListResponse)
-async def list_documents(*, current_user: User = Depends(get_current_user)):
+async def list_documents(
+    *,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
     """
     List all uploaded documents for the current user.
 
-    Returns metadata for all documents owned by the authenticated user.
+    Returns metadata for all documents owned by the authenticated user from database.
     """
     try:
         logger.info(f"User {current_user.id} listing documents")
 
-        # Get user's document IDs from vector store
-        document_ids = vector_store_service.get_user_documents(current_user.id)
-        logger.debug(f"Found {len(document_ids)} document IDs in vector store")
+        # Query database for user's documents
+        stmt = select(UserDocument).where(UserDocument.user_id == current_user.id)
+        result = await session.execute(stmt)
+        user_documents = result.scalars().all()
 
-        documents = []
-        user_upload_dir = settings.UPLOAD_FOLDER / f"user_{current_user.id}"
+        logger.debug(f"Found {len(user_documents)} documents in database")
 
-        if user_upload_dir.exists():
-            pdf_files = list(user_upload_dir.glob("*.pdf"))
-            logger.debug(f"Found {len(pdf_files)} PDF files in upload directory")
-
-            for file_path in pdf_files:
-                try:
-                    # Extract metadata
-                    metadata = pdf_processor.extract_metadata(file_path)
-                    document_id = pdf_processor.generate_document_id(
-                        file_path, current_user.id
-                    )
-
-                    # Only include if in user's document list
-                    if document_id not in document_ids:
-                        logger.debug(f"Skipping orphaned file: {file_path.name}")
-                        continue
-
-                    # Get chunks for this document
-                    chunks = vector_store_service.get_document_chunks(
-                        document_id, current_user.id
-                    )
-
-                    doc_info = DocumentInfo(
-                        document_id=document_id,
-                        filename=file_path.name,
-                        file_size=metadata["file_size"],
-                        pages=metadata["pages"],
-                        upload_time=datetime.fromtimestamp(file_path.stat().st_mtime),
-                        status=DocumentStatus.READY if chunks else DocumentStatus.ERROR,
-                        chunk_count=len(chunks),
-                    )
-
-                    documents.append(doc_info)
-                    logger.debug(
-                        f"Added document: {document_id} ({len(chunks)} chunks)"
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        f"Error processing file {file_path.name} for user {current_user.id}: {str(e)}"
-                    )
-                    continue
-        else:
-            logger.debug(f"Upload directory does not exist: {user_upload_dir}")
+        # Convert to DocumentInfo schema
+        documents = [doc.to_document_info() for doc in user_documents]
 
         logger.info(f"Returning {len(documents)} documents for user {current_user.id}")
 
@@ -409,19 +432,28 @@ async def list_documents(*, current_user: User = Depends(get_current_user)):
 
 @router.get("/{document_id}", response_model=DocumentInfo)
 async def get_document(
-    *, document_id: str, current_user: User = Depends(get_current_user)
+    *,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     Get information about a specific document (requires ownership).
 
-    Returns detailed metadata for the requested document.
+    Returns detailed metadata for the requested document from database.
     """
     try:
         logger.info(f"User {current_user.id} getting document info: {document_id}")
 
-        # Verify ownership
-        chunks = vector_store_service.get_document_chunks(document_id, current_user.id)
-        if not chunks:
+        # Query database for document
+        stmt = select(UserDocument).where(
+            UserDocument.user_id == current_user.id,
+            UserDocument.document_id == document_id
+        )
+        result = await session.execute(stmt)
+        user_doc = result.scalar_one_or_none()
+
+        if not user_doc:
             logger.warning(
                 f"Document not found or access denied for user {current_user.id}: {document_id}"
             )
@@ -430,35 +462,9 @@ async def get_document(
                 detail="Document not found or access denied",
             )
 
-        logger.debug(f"Found {len(chunks)} chunks for document {document_id}")
+        logger.debug(f"Retrieved metadata for {document_id} from database")
 
-        # Find document file in user's directory
-        user_upload_dir = settings.UPLOAD_FOLDER / f"user_{current_user.id}"
-
-        for file_path in user_upload_dir.glob("*.pdf"):
-            doc_id = pdf_processor.generate_document_id(file_path, current_user.id)
-
-            if doc_id == document_id:
-                metadata = pdf_processor.extract_metadata(file_path)
-                logger.debug(f"Retrieved metadata for {document_id}")
-
-                return DocumentInfo(
-                    document_id=document_id,
-                    filename=file_path.name,
-                    file_size=metadata["file_size"],
-                    pages=metadata["pages"],
-                    upload_time=datetime.fromtimestamp(file_path.stat().st_mtime),
-                    status=DocumentStatus.READY if chunks else DocumentStatus.ERROR,
-                    chunk_count=len(chunks),
-                )
-
-        logger.error(
-            f"Document file not found on disk for user {current_user.id}: {document_id}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document not found: {document_id}",
-        )
+        return user_doc.to_document_info()
 
     except HTTPException:
         raise
@@ -475,7 +481,10 @@ async def get_document(
 
 @router.get("/{document_id}/status")
 async def get_document_status(
-    *, document_id: str, current_user: User = Depends(get_current_user)
+    *,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     Check if a document has finished processing.
@@ -487,24 +496,31 @@ async def get_document_status(
             f"User {current_user.id} checking status for document: {document_id}"
         )
 
-        chunks = vector_store_service.get_document_chunks(document_id, current_user.id)
+        # Query database for document
+        stmt = select(UserDocument).where(
+            UserDocument.user_id == current_user.id,
+            UserDocument.document_id == document_id
+        )
+        result = await session.execute(stmt)
+        user_doc = result.scalar_one_or_none()
 
-        if chunks:
-            logger.debug(f"Document {document_id} is ready with {len(chunks)} chunks")
-            return {
-                "document_id": document_id,
-                "status": DocumentStatus.READY,
-                "chunk_count": len(chunks),
-                "message": "Document processing complete",
-            }
-        else:
-            logger.debug(f"Document {document_id} is still processing")
-            return {
-                "document_id": document_id,
-                "status": DocumentStatus.PROCESSING,
-                "message": "Document is still processing",
-            }
+        if not user_doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found or access denied",
+            )
 
+        logger.debug(f"Document {document_id} status: {user_doc.status}")
+
+        return {
+            "document_id": document_id,
+            "status": DocumentStatus(user_doc.status),
+            "chunk_count": user_doc.chunk_count,
+            "message": f"Document is {user_doc.status}",
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(
             f"Error checking status for document {document_id}, user {current_user.id}: {str(e)}"
@@ -522,21 +538,30 @@ async def get_document_status(
 
 @router.delete("/{document_id}")
 async def delete_document(
-    *, document_id: str, current_user: User = Depends(get_current_user)
+    *,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     Delete a document and its embeddings (requires ownership).
 
-    Removes both the file and all associated vector embeddings.
+    Removes both the database record and all associated vector embeddings.
     """
     try:
         logger.warning(
             f"User {current_user.id} ({current_user.username}) deleting document: {document_id}"
         )
 
-        # Verify ownership first
-        chunks = vector_store_service.get_document_chunks(document_id, current_user.id)
-        if not chunks:
+        # Query database for document
+        stmt = select(UserDocument).where(
+            UserDocument.user_id == current_user.id,
+            UserDocument.document_id == document_id
+        )
+        result = await session.execute(stmt)
+        user_doc = result.scalar_one_or_none()
+
+        if not user_doc:
             logger.warning(
                 f"Delete failed - document not found or access denied for user {current_user.id}: "
                 f"{document_id}"
@@ -546,54 +571,36 @@ async def delete_document(
                 detail="Document not found or access denied",
             )
 
-        logger.debug(f"Verified ownership: {len(chunks)} chunks found")
-
-        # Find and delete file in user's directory
-        user_upload_dir = settings.UPLOAD_FOLDER / f"user_{current_user.id}"
-        file_deleted = False
-
-        for file_path in user_upload_dir.glob("*.pdf"):
-            doc_id = pdf_processor.generate_document_id(file_path, current_user.id)
-
-            if doc_id == document_id:
-                file_path.unlink()
-                file_deleted = True
-                logger.info(
-                    f"Deleted file for user {current_user.id}: {file_path.name}"
-                )
-                break
-
-        if not file_deleted:
-            logger.error(
-                f"Document file not found on disk for user {current_user.id}: {document_id}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document file not found: {document_id}",
-            )
+        logger.debug(f"Verified ownership for document {document_id}")
 
         # Delete from vector store
         logger.debug(
             f"Deleting embeddings from vector store for document: {document_id}"
         )
-        result = vector_store_service.delete_document(document_id, current_user.id)
+        vector_result = vector_store_service.delete_document(document_id, current_user.id)
 
-        if not result["success"]:
+        chunks_deleted = vector_result.get('chunks_deleted', 0) if vector_result["success"] else 0
+
+        if not vector_result["success"]:
             logger.warning(
                 f"Failed to delete from vector store for user {current_user.id}: "
-                f"{result.get('error')}"
+                f"{vector_result.get('error')}"
             )
+
+        # Delete from database
+        await session.delete(user_doc)
+        await session.commit()
 
         logger.info(
             f"✅ Document deleted by user {current_user.id}: {document_id} "
-            f"({result.get('chunks_deleted', 0)} chunks removed)"
+            f"({chunks_deleted} chunks removed)"
         )
 
         return {
             "success": True,
             "document_id": document_id,
             "message": "Document deleted successfully",
-            "chunks_deleted": result.get("chunks_deleted", 0),
+            "chunks_deleted": chunks_deleted,
         }
 
     except HTTPException:
@@ -603,6 +610,7 @@ async def delete_document(
             f"Error deleting document {document_id} for user {current_user.id}: {str(e)}",
             exc_info=True,
         )
+        await session.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting document: {str(e)}",
@@ -615,22 +623,26 @@ async def delete_document(
 
 
 @router.get("/stats/user")
-async def get_user_document_stats(*, current_user: User = Depends(get_current_user)):
+async def get_user_document_stats(
+    *,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_async_session),
+):
     """
     Get statistics about the current user's documents.
 
-    Returns document count, total chunks, and document IDs.
+    Returns document count, total chunks, and document IDs from database.
     """
     try:
         logger.info(f"User {current_user.id} requesting document statistics")
 
-        document_ids = vector_store_service.get_user_documents(current_user.id)
-        logger.debug(f"Found {len(document_ids)} documents for user {current_user.id}")
+        # Query database for user's documents
+        stmt = select(UserDocument).where(UserDocument.user_id == current_user.id)
+        result = await session.execute(stmt)
+        user_documents = result.scalars().all()
 
-        total_chunks = 0
-        for doc_id in document_ids:
-            chunks = vector_store_service.get_document_chunks(doc_id, current_user.id)
-            total_chunks += len(chunks)
+        document_ids = [doc.document_id for doc in user_documents]
+        total_chunks = sum(doc.chunk_count for doc in user_documents)
 
         logger.info(
             f"User {current_user.id} stats: {len(document_ids)} documents, "
