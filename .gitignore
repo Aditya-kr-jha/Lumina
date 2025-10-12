@@ -1,5 +1,6 @@
 .env.*
 app/.env
+backend/app/.env
 # Virtual Environment
 .venv/
 venv/
