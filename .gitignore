@@ -13,3 +13,10 @@ ENV/
 aws_credentials.json
 .aws/app/.env
 Backend/app/.env
+
+Frontend/node_modules/
+Frontend/dist/
+Frontend/.env.local
+Frontend/Lumina/node_modules/
+Frontend/Lumina/dist/
+Frontend/Lumina/.env.local

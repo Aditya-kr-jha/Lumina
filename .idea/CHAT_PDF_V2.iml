@@ -5,7 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/Backend" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/Backend/app" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/Backend/app/services" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/Backend/app/testing_scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Backend/app/scripts" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.13 (CHAT_PDF_V2)" jdkType="Python SDK" />

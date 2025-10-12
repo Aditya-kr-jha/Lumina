@@ -15,31 +15,32 @@ from sqlmodel import SQLModel
 from app.config import settings
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # Goes up to Backend/
-DB_PATH = BASE_DIR / "lumina.db"
+# BASE_DIR = Path(__file__).resolve().parent.parent.parent  # Goes up to Backend/
+# DB_PATH = BASE_DIR / "lumina.db"
 
 # Use absolute path for SQLite
-DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+# DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
 # Construct the database URL
-# DATABASE_URL = f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.RDS_ENDPOINT}:{settings.DB_PORT}/{settings.DB_NAME}"
-# DATABASE_URL = "sqlite+aiosqlite:///./lumina.db"
+DATABASE_URL = f"postgresql+asyncpg://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.RDS_ENDPOINT}:{settings.DB_PORT}/{settings.DB_NAME}"
+#
+#
 # Create the async engine with proper AWS RDS configuration
-# async_engine = create_async_engine(
-#     DATABASE_URL,
-#     echo=settings.ECHO,
-#     connect_args={
-#         "timeout": 60,
-#         "command_timeout": 60,
-#         "ssl": "require",  # Required for AWS RDS
-#         "server_settings": {"application_name": "OrbitBank"},
-#     },
-# )
 async_engine = create_async_engine(
     DATABASE_URL,
     echo=settings.ECHO,
-    connect_args={"check_same_thread": False},  # Required for SQLite
+    connect_args={
+        "timeout": 60,
+        "command_timeout": 60,
+        "ssl": "require",  # Required for AWS RDS
+        "server_settings": {"application_name": "Lumina"},
+    },
 )
+# async_engine = create_async_engine(
+#     DATABASE_URL,
+#     echo=settings.ECHO,
+#     connect_args={"check_same_thread": False},  # Required for SQLite
+# )
 # Create a sessionmaker for async sessions
 AsyncSessionLocal = sessionmaker(
     bind=async_engine,

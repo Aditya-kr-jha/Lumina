@@ -41,8 +41,11 @@ class UserDocument(SQLModel, table=True):
     filename: str = Field(max_length=255)
     file_size: int = Field(ge=0)
     pages: int = Field(ge=0)
-    upload_time: datetime = Field(default_factory=datetime.now(timezone.utc))
-    status: str = Field(default="uploading", max_length=20)  # Store as string in DB
+    upload_time: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_type=sqlalchemy.TIMESTAMP(timezone=True),
+    )
+    status: str = Field(default="uploading", max_length=20)
     chunk_count: int = Field(default=0, ge=0)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -80,7 +83,9 @@ class QueryLog(SQLModel, table=True):
     document_id: str = Field(index=True)
     session_id: str = Field(index=True)
     timestamp: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc), index=True
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_type=sqlalchemy.TIMESTAMP(timezone=True),
+        index=True,
     )
 
 

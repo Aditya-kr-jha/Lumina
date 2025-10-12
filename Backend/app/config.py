@@ -115,14 +115,49 @@ class Settings(BaseSettings):
         le=100,
         description="Maximum number of chat interactions to store per session",
     )
+
+    # Application Configuration
     DEBUG: bool = Field(default=False, description="Turn it off for production")
+    ECHO: bool = Field(default=True, description="Echo SQL statements")
+    RELOAD: bool = Field(default=True, description="Auto-reload on code changes")
 
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 300
+    # Security Configuration
+    SECRET_KEY: str = Field(
+        default="rhrytuejifuhru4577838478f47ty748urujruty478uru4t58y",
+        description="Secret key for JWT encoding",
+    )
+    ALGORITHM: str = Field(default="HS256", description="JWT algorithm")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=300,
+        description="JWT token expiration time in minutes",
+    )
 
-    ECHO: bool = True
-    RELOAD: bool = True
-    SECRET_KEY: str = "rhrytuejifuhru4577838478f47ty748urujruty478uru4t58y"
+    # Database Configuration
+    DB_USER: str = Field(default="fn7n48dr", description="Database username")
+    DB_PASSWORD: str = Field(default="fn7n48dr", description="Database password")
+    RDS_ENDPOINT: str = Field(default="fn7n48dr", description="RDS endpoint URL")
+    DB_PORT: int = Field(default=5432, description="Database port")
+    DB_NAME: str = Field(default="fn7n48dr", description="Database name")
+
+    # AWS Configuration
+    AWS_ACCESS_KEY_ID: str = Field(
+        default="fhefhedfuefyeudnbfhefhuefuefuygeruf",
+        description="AWS access key ID",
+    )
+    AWS_SECRET_ACCESS_KEY: str = Field(
+        default="hefeyfrhiwdhefiheyfhienhyfhefy",
+        description="AWS secret access key",
+    )
+
+    AWS_DEFAULT_REGION: str = Field(
+        default="us-east-1",
+        description="AWS region",
+    )
+
+    @property
+    def DATABASE_URL(self) -> str:
+        """Generate async PostgreSQL database URL for SQLAlchemy."""
+        return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}@{self.RDS_ENDPOINT}:{self.DB_PORT}/{self.DB_NAME}"
 
     @field_validator("CHUNK_OVERLAP")
     @classmethod

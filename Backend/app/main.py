@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
+from starlette.middleware.cors import CORSMiddleware
 
 from app.routes.api import api_router
 from app.db.session import create_db_and_tables_async, get_async_session
@@ -39,6 +40,23 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(api_router, prefix="/api/v1")
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5176",
+    "http://localhost:5174",
+    "http://localhost:5177",
+    "http://localhost:5175",
+    "https://dg9qzy1dkyjl5.cloudfront.net",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
