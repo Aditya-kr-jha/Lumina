@@ -87,7 +87,7 @@ jobs:
           envs: BACKEND_IMAGE,FRONTEND_IMAGE,AWS_REGION,ECR_REGISTRY
           script: |
             # Navigate to application directory
-            cd /home/${{ secrets.EC2_USERNAME }}/lumina-app
+            cd /home/${{ secrets.EC2_USERNAME }}/Lumina
             
             # Login to ECR
             aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
