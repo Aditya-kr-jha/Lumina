@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import { createContext, useState, useContext, useCallback } from 'react';
 import {
   sendChatQuery,
@@ -16,13 +17,13 @@ export const ChatProvider = ({ children }) => {
 
   const startNewChat = useCallback(() => {
     setMessages([]);
-    setSessionId(crypto.randomUUID());
+    setSessionId(uuidv4());
     setError(null);
   }, []);
 
   const sendMessage = async (question, documentId) => {
     if (!sessionId) {
-      setSessionId(crypto.randomUUID());
+      setSessionId(uuidv4());
     }
 
     try {
