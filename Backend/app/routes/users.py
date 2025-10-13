@@ -18,7 +18,7 @@ from app.models.schemas import (
     UserRole,
     UserCreateByAdmin,
 )
-from query_stats import query_stats_service
+from app.services.query_stats import query_stats_service
 
 # Configure logger
 logger = logging.getLogger(__name__)
