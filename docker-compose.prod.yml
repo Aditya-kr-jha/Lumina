@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-841629848330.dkr.ecr.us-east-1.amazonaws.com/lumina-backend:latest}
+    container_name: lumina-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/app/.env
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-841629848330.dkr.ecr.us-east-1.amazonaws.com/lumina-frontend:latest}
+    container_name: lumina-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
