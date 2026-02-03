@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV ALEMBIC_CONFIG=/app/alembic.ini
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -19,4 +20,4 @@ COPY . .
 EXPOSE 8000
 
 # Run migrations and start server
-CMD alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
+CMD alembic -c /app/alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
