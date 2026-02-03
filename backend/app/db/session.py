@@ -63,7 +63,7 @@ async def create_db_and_tables_async():
 async def get_async_session() -> AsyncGenerator[Any, Any]:
     """
     Dependency function that yields an async session.
-    Ensures the session is closed after the request.
+    Ensures the session is closed after the requesttt.
     """
     print("Creating a new async session")
     async with AsyncSessionLocal() as session:
