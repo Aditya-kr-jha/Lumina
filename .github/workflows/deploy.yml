@@ -21,7 +21,7 @@ jobs:
           script: |
             set -e
 
-            cd /home/${{ secrets.GCP_USERNAME }}/lumina-repo
+            cd /home/${{ secrets.GCP_USERNAME }}/CHAT_PDF_V2
             git fetch origin main
             git reset --hard origin/main
 
