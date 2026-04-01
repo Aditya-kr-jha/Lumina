@@ -1,120 +1,38 @@
-name: Build and Deploy to EC2
+name: Deploy Lumina to GCP
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main]
   workflow_dispatch:
 
-env:
-  AWS_REGION: us-east-1
-  ECR_BACKEND_REPO: 801829804930.dkr.ecr.us-east-1.amazonaws.com/lumina-backend
-  ECR_FRONTEND_REPO: 801829804930.dkr.ecr.us-east-1.amazonaws.com/lumina-frontend
-
 jobs:
-  build-and-push:
-    name: Build and Push Docker Images
-    runs-on: ubuntu-latest
-
-    outputs:
-      backend-image: ${{ steps.build-backend.outputs.image }}
-      frontend-image: ${{ steps.build-frontend.outputs.image }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push Backend image
-        id: build-backend
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          BACKEND_IMAGE=${{ env.ECR_BACKEND_REPO }}:$IMAGE_TAG
-          
-          docker build -t $BACKEND_IMAGE ./backend
-          docker tag $BACKEND_IMAGE ${{ env.ECR_BACKEND_REPO }}:latest
-          
-          docker push $BACKEND_IMAGE
-          docker push ${{ env.ECR_BACKEND_REPO }}:latest
-          
-          echo "image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
-
-      - name: Build and push Frontend image
-        id: build-frontend
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          FRONTEND_IMAGE=${{ env.ECR_FRONTEND_REPO }}:$IMAGE_TAG
-          
-          docker build -t $FRONTEND_IMAGE ./frontend
-          docker tag $FRONTEND_IMAGE ${{ env.ECR_FRONTEND_REPO }}:latest
-          
-          docker push $FRONTEND_IMAGE
-          docker push ${{ env.ECR_FRONTEND_REPO }}:latest
-          
-          echo "image=$FRONTEND_IMAGE" >> $GITHUB_OUTPUT
-
   deploy:
-    name: Deploy to EC2
     runs-on: ubuntu-latest
-    needs: build-and-push
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Deploy to EC2
+      - name: Deploy to GCP
         uses: appleboy/ssh-action@v1.0.3
-        env:
-          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend-image }}
-          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend-image }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-          ECR_REGISTRY: 801829804930.dkr.ecr.us-east-1.amazonaws.com
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          envs: BACKEND_IMAGE,FRONTEND_IMAGE,AWS_REGION,ECR_REGISTRY
+          host: ${{ secrets.GCP_HOST }}
+          username: ${{ secrets.GCP_USERNAME }}
+          key: ${{ secrets.GCP_SSH_KEY }}
+          command_timeout: 30m
           script: |
-            # Navigate to application directory
-            cd /home/${{ secrets.EC2_USERNAME }}/Lumina
-            
-            # Login to ECR
-            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
-            
-            # Pull the specific images that were just built
-            echo "Pulling backend image: ${BACKEND_IMAGE}"
-            docker pull ${BACKEND_IMAGE}
-            
-            echo "Pulling frontend image: ${FRONTEND_IMAGE}"
-            docker pull ${FRONTEND_IMAGE}
-            
-            # Update docker-compose to use the new images
-            export BACKEND_IMAGE=${BACKEND_IMAGE}
-            export FRONTEND_IMAGE=${FRONTEND_IMAGE}
-            
-            # Stop and remove old containers
-            docker-compose down || true
-            
-            # Start new containers with the specific images
-            docker-compose up -d
-            
-            # Verify deployment
-            docker-compose ps
-            
-            # Clean up old images
-            docker image prune -af
-            
-            echo "Deployment completed successfully!"
-            echo "Backend image: ${BACKEND_IMAGE}"
-            echo "Frontend image: ${FRONTEND_IMAGE}"
+            set -e
+
+            cd /home/${{ secrets.GCP_USERNAME }}/lumina-repo
+            git fetch origin main
+            git reset --hard origin/main
+
+            docker build -t lumina-backend:latest ./backend
+            docker build -t lumina-frontend:latest ./frontend
+
+            cd /home/${{ secrets.GCP_USERNAME }}/portfolio
+            docker-compose up -d --no-deps lumina-backend lumina-frontend
+
+            docker exec lumina-backend alembic upgrade head || true
+            docker image prune -f
+
+            sleep 3
+            curl -sf http://localhost:8001/health && echo "Lumina OK" || echo "Lumina FAILED"
